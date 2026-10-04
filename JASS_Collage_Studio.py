@@ -1,910 +1,513 @@
 #!/usr/bin/env python3
 """
-JASS Collage Studio v1.1
-Photo collage editor with movable, scalable, rotatable image objects.
+JASS Collage Studio
+A polished PySide6 desktop collage maker.
 
-Install:
-    python -m pip install PySide6
+Requirements:
+    pip install PySide6 Pillow
 
 Run:
-    python jass_collage_studio_v1_1.py
+    python jass_collage_studio.py
 """
-
-import sys
+import sys, os, math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRectF, QSize
+from PySide6.QtCore import Qt, QSize, QRectF, QPointF
 from PySide6.QtGui import (
-    QAction, QColor, QFont, QIcon, QImage, QPainter, QPen,
-    QBrush, QPixmap, QPalette
+    QAction, QImage, QPainter, QPen, QBrush, QColor, QPixmap,
+    QFont, QIcon, QLinearGradient
 )
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox, QGraphicsDropShadowEffect,
-    QToolBar, QStatusBar, QSplitter, QListWidget, QListWidgetItem,
-    QPushButton, QLabel, QSlider, QColorDialog, QInputDialog,
-    QComboBox, QScrollArea,
-    QVBoxLayout, QHBoxLayout, QGroupBox, QFrame, QGraphicsView,
-    QGraphicsScene, QGraphicsPixmapItem, QGraphicsTextItem
+    QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox,
+    QListWidget, QListWidgetItem, QPushButton, QLabel, QSlider,
+    QSpinBox, QComboBox, QColorDialog, QToolBar, QStatusBar,
+    QHBoxLayout, QVBoxLayout, QGridLayout, QFrame, QSplitter,
+    QScrollArea, QGroupBox
 )
 
+try:
+    from PIL import Image, ImageOps, ImageEnhance
+except ImportError:
+    Image = None
+
+
 APP_NAME = "JASS Collage Studio"
-VERSION = "1.4.0"
-UI_WHITE_TEXT = True
+VERSION = "1.0"
 
 
-class ImageItem(QGraphicsPixmapItem):
-    def __init__(self, pixmap, path):
-        super().__init__(pixmap)
-        self.path = path
-        self.locked = False
-        self.frame_width = 0
-        self.frame_color = QColor("#ffffff")
-        self.setToolTip(path)
-        self.setFlags(
-            QGraphicsPixmapItem.ItemIsMovable |
-            QGraphicsPixmapItem.ItemIsSelectable |
-            QGraphicsPixmapItem.ItemSendsGeometryChanges
-        )
-        self.setTransformationMode(Qt.SmoothTransformation)
-
-    def set_locked(self, locked):
-        self.locked = locked
-        self.setFlag(
-            QGraphicsPixmapItem.ItemIsMovable,
-            not locked
-        )
-        self.setFlag(
-            QGraphicsPixmapItem.ItemIsSelectable,
-            True
-        )
-
-    def set_shadow(self, enabled):
-        if enabled:
-            effect = QGraphicsDropShadowEffect()
-            effect.setBlurRadius(22)
-            effect.setOffset(6, 6)
-            effect.setColor(QColor(0, 0, 0, 150))
-            self.setGraphicsEffect(effect)
-        else:
-            self.setGraphicsEffect(None)
-
-    def set_frame(self, width, color):
-        self.frame_width = width
-        self.frame_color = color
-        pen = QPen(color, width)
-        self.setPen(pen)
-
-    def itemChange(self, change, value):
-        return super().itemChange(change, value)
-
-
-class TextItem(QGraphicsTextItem):
-    def __init__(self, text):
-        super().__init__(text)
-        self.setDefaultTextColor(QColor("white"))
-        self.setFont(QFont("Segoe UI", 30, QFont.Bold))
-        self.locked = False
-
-    def set_locked(self, locked):
-        self.locked = locked
-        self.setFlag(
-            QGraphicsTextItem.ItemIsMovable,
-            not locked
-        )
-        self.setFlags(
-            QGraphicsTextItem.ItemIsMovable |
-            QGraphicsTextItem.ItemIsSelectable
-        )
-
-
-class Canvas(QGraphicsView):
+class CollageCanvas(QWidget):
     def __init__(self):
         super().__init__()
-        self.scene = QGraphicsScene(self)
-        self.setScene(self.scene)
-        self.scene.setSceneRect(0, 0, 1200, 900)
-        self.setRenderHints(
-            QPainter.Antialiasing | QPainter.SmoothPixmapTransform
-        )
-        self.setAcceptDrops(True)
-        self.setDragMode(QGraphicsView.RubberBandDrag)
-        self.background = QColor("#f4f4f6")
-        self.setBackgroundBrush(self.background)
-        self._zoom = 1.0
+        self.setMinimumSize(700, 520)
+        self.setAutoFillBackground(True)
+        self.images = []
+        self.layout_name = "2 × 2"
+        self.bg = QColor("#f5f5f5")
+        self.border = QColor("#ffffff")
+        self.spacing = 12
+        self.radius = 0
+        self.fit_mode = "Crop"
+        self._pixmaps = []
 
-    def add_image(self, path):
-        pm = QPixmap(path)
+    def set_images(self, paths):
+        self.images = paths[:]
+        self._pixmaps = []
+        for p in self.images:
+            pm = QPixmap(p)
+            if not pm.isNull():
+                self._pixmaps.append(pm)
+        self.update()
+
+    def set_options(self, layout_name=None, spacing=None, bg=None,
+                    border=None, radius=None, fit_mode=None):
+        if layout_name is not None:
+            self.layout_name = layout_name
+        if spacing is not None:
+            self.spacing = spacing
+        if bg is not None:
+            self.bg = bg
+        if border is not None:
+            self.border = border
+        if radius is not None:
+            self.radius = radius
+        if fit_mode is not None:
+            self.fit_mode = fit_mode
+        self.update()
+
+    def _grid(self, n):
+        if self.layout_name == "1 × 1":
+            return 1, 1
+        if self.layout_name == "1 × 2":
+            return 2, 1
+        if self.layout_name == "2 × 1":
+            return 1, 2
+        if self.layout_name == "3 × 1":
+            return 1, 3
+        if self.layout_name == "1 × 3":
+            return 3, 1
+        if self.layout_name == "3 × 3":
+            return 3, 3
+        if self.layout_name == "4 × 4":
+            return 4, 4
+        return 2, 2
+
+    def _rounded_rect_path(self, rect, radius):
+        from PySide6.QtGui import QPainterPath
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        return path
+
+    def _draw_image(self, painter, pm, rect):
         if pm.isNull():
-            return None
-        pm = pm.scaled(520, 520, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        item = ImageItem(pm, path)
-        n = len(self.image_items())
-        item.setPos(70 + (n % 4) * 60, 70 + (n % 4) * 60)
-        self.scene.addItem(item)
-        self.select(item)
-        return item
-
-    def add_images(self, paths):
-        return [x for x in (self.add_image(p) for p in paths) if x]
-
-    def image_items(self):
-        return [
-            x for x in self.scene.items()
-            if isinstance(x, ImageItem)
-        ]
-
-    def selected(self):
-        items = self.scene.selectedItems()
-        return items[0] if items else None
-
-    def select(self, item):
-        self.scene.clearSelection()
-        if item:
-            item.setSelected(True)
-            self.centerOn(item)
-
-    def delete_selected(self):
-        item = self.selected()
-        if item:
-            self.scene.removeItem(item)
-            return item
-        return None
-
-    def duplicate_selected(self):
-        item = self.selected()
-        if not isinstance(item, ImageItem):
-            return None
-        new = ImageItem(item.pixmap(), item.path)
-        new.setPos(item.pos() + self.scene.views()[0].mapToScene(20, 20)
-                   - self.scene.views()[0].mapToScene(0, 0))
-        new.setScale(item.scale())
-        new.setRotation(item.rotation())
-        new.setZValue(item.zValue() + 0.1)
-        self.scene.addItem(new)
-        self.select(new)
-        return new
-
-    def rotate(self, degrees):
-        item = self.selected()
-        if item:
-            item.setRotation(item.rotation() + degrees)
-
-    def scale_selected(self, percent):
-        item = self.selected()
-        if item:
-            item.setScale(percent / 100.0)
-
-    def bring_forward(self):
-        item = self.selected()
-        if item:
-            item.setZValue(item.zValue() + 1)
-
-    def send_backward(self):
-        item = self.selected()
-        if item:
-            item.setZValue(item.zValue() - 1)
-
-    def fit_selected(self):
-        item = self.selected()
-        if not item:
             return
-        r = item.sceneBoundingRect()
-        target = self.scene.sceneRect().adjusted(50, 50, -50, -50)
-        if r.width() <= 0 or r.height() <= 0:
-            return
-        scale = min(target.width() / r.width(), target.height() / r.height())
-        item.setScale(item.scale() * scale)
-        item.setPos(
-            target.center().x() - item.boundingRect().width() * item.scale() / 2,
-            target.center().y() - item.boundingRect().height() * item.scale() / 2
-        )
-
-    def template_grid(self, columns, rows):
-        items = self.image_items()
-        if not items:
-            return
-        canvas = self.scene.sceneRect()
-        margin, gap = 35, 18
-        cw = (canvas.width() - 2*margin - gap*(columns-1)) / columns
-        ch = (canvas.height() - 2*margin - gap*(rows-1)) / rows
-        for i, item in enumerate(items[:columns*rows]):
-            row, col = divmod(i, columns)
-            x = margin + col*(cw+gap)
-            y = margin + row*(ch+gap)
-            bw = item.pixmap().width()
-            bh = item.pixmap().height()
-            scale = min(cw/bw, ch/bh)
-            item.setScale(scale)
-            item.setRotation(0)
-            item.setPos(
-                x + (cw-bw*scale)/2,
-                y + (ch-bh*scale)/2
+        if self.fit_mode == "Fit":
+            scaled = pm.scaled(
+                int(rect.width()), int(rect.height()),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
+            x = rect.x() + (rect.width() - scaled.width()) / 2
+            y = rect.y() + (rect.height() - scaled.height()) / 2
+            target = QRectF(x, y, scaled.width(), scaled.height())
+            painter.drawPixmap(target, scaled)
+        else:
+            src_ratio = pm.width() / max(1, pm.height())
+            dst_ratio = rect.width() / max(1, rect.height())
+            if src_ratio > dst_ratio:
+                h = pm.height()
+                w = int(h * dst_ratio)
+                x = (pm.width() - w) // 2
+                source = QRectF(x, 0, w, h)
+            else:
+                w = pm.width()
+                h = int(w / dst_ratio)
+                y = (pm.height() - h) // 2
+                source = QRectF(0, y, w, h)
+            painter.drawPixmap(rect, pm, source)
 
-    def zoom_in(self):
-        self.scale(1.15, 1.15)
-        self._zoom *= 1.15
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
-    def zoom_out(self):
-        self.scale(1/1.15, 1/1.15)
-        self._zoom /= 1.15
+        # checker-like neutral workspace background
+        painter.fillRect(self.rect(), QColor("#20242b"))
 
-    def zoom_reset(self):
-        self.resetTransform()
-        self._zoom = 1.0
+        margin = 32
+        canvas = QRectF(margin, margin,
+                        self.width() - 2 * margin,
+                        self.height() - 2 * margin)
+        painter.fillRect(canvas, self.bg)
 
-    def add_text(self, text):
-        if not text.strip():
-            return
-        item = TextItem(text)
-        item.setPos(420, 390)
-        self.scene.addItem(item)
-        self.select(item)
+        cols, rows = self._grid(max(1, len(self._pixmaps)))
+        gap = self.spacing
+        cell_w = (canvas.width() - gap * (cols - 1)) / cols
+        cell_h = (canvas.height() - gap * (rows - 1)) / rows
 
-    def add_rectangle(self):
-        from PySide6.QtWidgets import QGraphicsRectItem
-        item = QGraphicsRectItem(0, 0, 260, 160)
-        item.setBrush(QBrush(QColor("#ffffff")))
-        item.setPen(QPen(QColor("#ffffff"), 2))
-        item.setFlags(
-            QGraphicsRectItem.ItemIsMovable |
-            QGraphicsRectItem.ItemIsSelectable
-        )
-        item.setPos(420, 300)
-        self.scene.addItem(item)
-        self.select(item)
+        for i, pm in enumerate(self._pixmaps[:cols * rows]):
+            r, c = divmod(i, cols)
+            rect = QRectF(
+                canvas.x() + c * (cell_w + gap),
+                canvas.y() + r * (cell_h + gap),
+                cell_w, cell_h
+            )
+            painter.save()
+            if self.radius > 0:
+                path = self._rounded_rect_path(rect, self.radius)
+                painter.setClipPath(path)
+            painter.setBrush(QBrush(self.border))
+            painter.fillRect(rect, self.border)
+            inner = rect.adjusted(3, 3, -3, -3)
+            if self.radius > 0:
+                path2 = self._rounded_rect_path(inner, max(0, self.radius - 3))
+                painter.setClipPath(path2)
+            self._draw_image(painter, pm, inner)
+            painter.restore()
 
-    def add_circle(self):
-        from PySide6.QtWidgets import QGraphicsEllipseItem
-        item = QGraphicsEllipseItem(0, 0, 180, 180)
-        item.setBrush(QBrush(QColor("#ff5f7a")))
-        item.setPen(QPen(QColor("#ffffff"), 2))
-        item.setFlags(
-            QGraphicsEllipseItem.ItemIsMovable |
-            QGraphicsEllipseItem.ItemIsSelectable
-        )
-        item.setPos(480, 330)
-        self.scene.addItem(item)
-        self.select(item)
-
-    def export_image(self, filename, width=2000, height=1500):
-        source = self.scene.sceneRect()
-        image = QImage(width, height, QImage.Format_ARGB32)
-        image.fill(self.background)
-        painter = QPainter(image)
-        painter.setRenderHints(
-            QPainter.Antialiasing | QPainter.SmoothPixmapTransform
-        )
-        self.scene.render(painter, QRectF(0, 0, width, height), source)
+        if not self._pixmaps:
+            painter.setPen(QColor("#8b93a1"))
+            painter.setFont(QFont("Segoe UI", 18))
+            painter.drawText(canvas, Qt.AlignCenter,
+                            "Add photos to start creating your collage")
         painter.end()
-        image.save(filename)
 
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
+    def render_image(self, width=1600, height=1200):
+        out = QImage(width, height, QImage.Format_ARGB32)
+        out.fill(self.bg)
+        painter = QPainter(out)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
-    def dropEvent(self, event):
+        cols, rows = self._grid(max(1, len(self._pixmaps)))
+        gap = int(self.spacing * width / max(1, self.width()))
+        gap = max(0, gap)
+        cell_w = (width - gap * (cols - 1)) / cols
+        cell_h = (height - gap * (rows - 1)) / rows
+
+        for i, pm in enumerate(self._pixmaps[:cols * rows]):
+            r, c = divmod(i, cols)
+            rect = QRectF(c * (cell_w + gap), r * (cell_h + gap),
+                          cell_w, cell_h)
+            painter.fillRect(rect, self.border)
+            inner = rect.adjusted(3, 3, -3, -3)
+            self._draw_image(painter, pm, inner)
+        painter.end()
+        return out
+
+
+class DropList(QListWidget):
+    def __init__(self, on_add):
+        super().__init__()
+        self.on_add = on_add
+        self.setAcceptDrops(True)
+        self.setIconSize(QSize(72, 72))
+        self.setSpacing(4)
+        self.setStyleSheet("""
+            QListWidget {
+                background:#171a20; border:1px solid #303641;
+                border-radius:10px; color:#e9edf3; padding:6px;
+            }
+            QListWidget::item { padding:6px; border-radius:7px; }
+            QListWidget::item:selected { background:#303846; }
+        """)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
         paths = []
-        for url in event.mimeData().urls():
-            p = url.toLocalFile()
-            if p.lower().endswith(
-                (".jpg",".jpeg",".png",".webp",".bmp",".gif",".tif",".tiff")
-            ):
+        for u in e.mimeData().urls():
+            p = u.toLocalFile()
+            if p.lower().endswith((".jpg",".jpeg",".png",".webp",".bmp",".gif",".tif",".tiff")):
                 paths.append(p)
-        self.add_images(paths)
-        event.acceptProposedAction()
+        if paths:
+            self.on_add(paths)
+        e.acceptProposedAction()
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {VERSION}")
-        self.resize(1450, 900)
-        self.setMinimumSize(1100, 720)
+        self.resize(1320, 820)
+        self.setMinimumSize(1050, 700)
+        self.paths = []
+
         self.build_ui()
         self.apply_theme()
 
+    def apply_theme(self):
+        self.setStyleSheet("""
+        QMainWindow, QWidget { background:#111318; color:#e8ebf0; }
+        QGroupBox {
+            border:1px solid #303641; border-radius:10px;
+            margin-top:12px; padding:12px; font-weight:600;
+        }
+        QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 5px; }
+        QPushButton {
+            background:#252a33; border:1px solid #3a424e;
+            border-radius:8px; padding:8px 12px;
+        }
+        QPushButton:hover { background:#303744; }
+        QPushButton:pressed { background:#1d222a; }
+        QComboBox, QSpinBox {
+            background:#1b1f26; border:1px solid #363e49;
+            border-radius:7px; padding:6px;
+        }
+        QSlider::groove:horizontal { height:5px; background:#343b46; border-radius:3px; }
+        QSlider::handle:horizontal { width:15px; margin:-5px 0; border-radius:8px; background:#8ab4ff; }
+        QLabel#title { font-size:20px; font-weight:700; }
+        QLabel#muted { color:#9da6b4; }
+        QToolBar { background:#171a20; border-bottom:1px solid #303641; spacing:5px; }
+        QStatusBar { background:#171a20; color:#9da6b4; }
+        """)
+
     def build_ui(self):
-        tb = QToolBar()
-        tb.setMovable(False)
-        self.addToolBar(tb)
+        toolbar = QToolBar()
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
 
-        def act(label, fn):
-            a = QAction(label, self)
-            a.triggered.connect(fn)
-            tb.addAction(a)
+        act_add = QAction("＋ Add Photos", self)
+        act_add.triggered.connect(self.add_files)
+        toolbar.addAction(act_add)
 
-        act("＋ Photos", self.open_images)
-        act("＋ Text", self.add_text)
-        act("▭ Rectangle", self.canvas_add_rectangle)
-        act("● Circle", self.canvas_add_circle)
-        tb.addSeparator()
-        act("⟲ Rotate Left", lambda: self.rotate(-90))
-        act("⟳ Rotate Right", lambda: self.rotate(90))
-        act("Duplicate", self.duplicate)
-        act("Delete", self.delete_selected)
-        tb.addSeparator()
-        act("Export", self.export)
+        act_save = QAction("Export", self)
+        act_save.triggered.connect(self.export)
+        toolbar.addAction(act_save)
 
-        splitter = QSplitter(Qt.Horizontal)
+        toolbar.addSeparator()
+        act_clear = QAction("Clear", self)
+        act_clear.triggered.connect(self.clear)
+        toolbar.addAction(act_clear)
 
-        # LEFT
+        central = QWidget()
+        root = QHBoxLayout(central)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(14)
+
         left = QFrame()
-        left.setMinimumWidth(250)
-        left.setMaximumWidth(320)
-        ll = QVBoxLayout(left)
+        left.setFixedWidth(300)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0,0,0,0)
 
         title = QLabel("JASS Collage Studio")
         title.setObjectName("title")
-        ll.addWidget(title)
+        left_layout.addWidget(title)
 
-        sub = QLabel("Creative Design Studio • v1.4.0")
+        sub = QLabel("Create beautiful photo collages")
         sub.setObjectName("muted")
-        ll.addWidget(sub)
+        left_layout.addWidget(sub)
 
         add = QPushButton("＋  Add Photos")
-        add.clicked.connect(self.open_images)
-        ll.addWidget(add)
+        add.clicked.connect(self.add_files)
+        left_layout.addWidget(add)
 
-        self.photo_list = QListWidget()
-        self.photo_list.setIconSize(QSize(64, 64))
-        self.photo_list.itemClicked.connect(self.select_from_list)
-        ll.addWidget(self.photo_list, 1)
+        self.list = DropList(self.add_paths)
+        left_layout.addWidget(self.list, 1)
 
-        rm = QPushButton("Remove Selected")
-        rm.clicked.connect(self.delete_selected)
-        ll.addWidget(rm)
+        row = QHBoxLayout()
+        rem = QPushButton("Remove Selected")
+        rem.clicked.connect(self.remove_selected)
+        up = QPushButton("↑")
+        up.setToolTip("Move selected image up")
+        up.clicked.connect(lambda: self.move_item(-1))
+        down = QPushButton("↓")
+        down.setToolTip("Move selected image down")
+        down.clicked.connect(lambda: self.move_item(1))
+        row.addWidget(rem)
+        row.addWidget(up)
+        row.addWidget(down)
+        left_layout.addLayout(row)
 
-        splitter.addWidget(left)
+        options = QGroupBox("Collage")
+        grid = QGridLayout(options)
 
-        # CENTER
+        grid.addWidget(QLabel("Layout"), 0, 0)
+        self.layout_combo = QComboBox()
+        self.layout_combo.addItems(["1 × 1","1 × 2","2 × 1","2 × 2",
+                                    "3 × 1","1 × 3","3 × 3","4 × 4"])
+        self.layout_combo.setCurrentText("2 × 2")
+        self.layout_combo.currentTextChanged.connect(self.refresh)
+        grid.addWidget(self.layout_combo, 0, 1)
+
+        grid.addWidget(QLabel("Fit"), 1, 0)
+        self.fit_combo = QComboBox()
+        self.fit_combo.addItems(["Crop", "Fit"])
+        self.fit_combo.currentTextChanged.connect(self.refresh)
+        grid.addWidget(self.fit_combo, 1, 1)
+
+        grid.addWidget(QLabel("Spacing"), 2, 0)
+        self.spacing = QSlider(Qt.Horizontal)
+        self.spacing.setRange(0, 40)
+        self.spacing.setValue(12)
+        self.spacing.valueChanged.connect(self.refresh)
+        grid.addWidget(self.spacing, 2, 1)
+
+        grid.addWidget(QLabel("Corners"), 3, 0)
+        self.corners = QSlider(Qt.Horizontal)
+        self.corners.setRange(0, 40)
+        self.corners.setValue(0)
+        self.corners.valueChanged.connect(self.refresh)
+        grid.addWidget(self.corners, 3, 1)
+
+        bg = QPushButton("Background")
+        bg.clicked.connect(self.choose_bg)
+        grid.addWidget(bg, 4, 0, 1, 2)
+
+        border = QPushButton("Border")
+        border.clicked.connect(self.choose_border)
+        grid.addWidget(border, 5, 0, 1, 2)
+
+        left_layout.addWidget(options)
+
+        root.addWidget(left)
+
         center = QFrame()
-        cl = QVBoxLayout(center)
-        cl.setContentsMargins(8, 8, 8, 8)
-
-        self.canvas = Canvas()
-        cl.addWidget(self.canvas, 1)
-
-        zr = QHBoxLayout()
-        zr.addStretch()
-        zo = QPushButton("−")
-        zi = QPushButton("+")
-        zreset = QPushButton("100%")
-        zo.clicked.connect(self.canvas.zoom_out)
-        zi.clicked.connect(self.canvas.zoom_in)
-        zreset.clicked.connect(self.canvas.zoom_reset)
-        zr.addWidget(zo)
-        zr.addWidget(zreset)
-        zr.addWidget(zi)
-        cl.addLayout(zr)
-
-        splitter.addWidget(center)
-
-        # RIGHT — scrollable settings panel
-        right_container = QFrame()
-        right_container.setMinimumWidth(290)
-        right_container.setMaximumWidth(350)
-        right_outer = QVBoxLayout(right_container)
-        right_outer.setContentsMargins(0, 0, 0, 0)
-
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        right_scroll.setFrameShape(QFrame.NoFrame)
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(0,0,0,0)
+        self.canvas = CollageCanvas()
+        center_layout.addWidget(self.canvas, 1)
+        root.addWidget(center, 1)
 
         right = QFrame()
-        right.setMinimumWidth(270)
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(8, 8, 8, 8)
-        rl.setSpacing(10)
+        right.setFixedWidth(220)
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0,0,0,0)
 
-        # Interface text control
-        ui_box = QGroupBox("Interface Text")
-        ui_layout = QHBoxLayout(ui_box)
-        self.ui_text_button = QPushButton("UI Text: WHITE")
-        self.ui_text_button.setToolTip(
-            "Toggle interface text between white and black"
-        )
-        self.ui_text_button.clicked.connect(self.toggle_ui_text)
-        ui_layout.addWidget(self.ui_text_button)
-        rl.addWidget(ui_box)
+        info = QGroupBox("Project")
+        il = QVBoxLayout(info)
+        self.count_label = QLabel("0 photos")
+        self.size_label = QLabel("Canvas: preview")
+        self.format_label = QLabel("Export: PNG / JPG")
+        for w in (self.count_label, self.size_label, self.format_label):
+            w.setObjectName("muted")
+            il.addWidget(w)
+        right_layout.addWidget(info)
 
-        templates = QGroupBox("Templates")
-        tl = QVBoxLayout(templates)
-        for label, fn in [
-            ("2 Photos", lambda: self.canvas.template_grid(2,1)),
-            ("4 Photos", lambda: self.canvas.template_grid(2,2)),
-            ("6 Photos", lambda: self.canvas.template_grid(3,2)),
-            ("9 Photos", lambda: self.canvas.template_grid(3,3)),
+        helpbox = QGroupBox("Tips")
+        hl = QVBoxLayout(helpbox)
+        for s in [
+            "• Drag photos into the list",
+            "• Reorder photos with ↑ / ↓",
+            "• Try Crop or Fit",
+            "• Adjust spacing and corners",
+            "• Export a high-resolution image"
         ]:
-            b = QPushButton(label)
-            b.clicked.connect(fn)
-            tl.addWidget(b)
-        rl.addWidget(templates)
+            lab = QLabel(s)
+            lab.setWordWrap(True)
+            hl.addWidget(lab)
+        right_layout.addWidget(helpbox)
+        right_layout.addStretch()
 
-        edit = QGroupBox("Selected Photo")
-        el = QVBoxLayout(edit)
-
-        self.scale_label = QLabel("Scale: 100%")
-        el.addWidget(self.scale_label)
-
-        self.scale = QSlider(Qt.Horizontal)
-        self.scale.setRange(10, 300)
-        self.scale.setValue(100)
-        self.scale.valueChanged.connect(self.change_scale)
-        el.addWidget(self.scale)
-
-        rr = QHBoxLayout()
-        lrot = QPushButton("↺")
-        rrot = QPushButton("↻")
-        lrot.setToolTip("Rotate left")
-        rrot.setToolTip("Rotate right")
-        lrot.clicked.connect(lambda: self.rotate(-90))
-        rrot.clicked.connect(lambda: self.rotate(90))
-        rr.addWidget(lrot)
-        rr.addWidget(rrot)
-        el.addLayout(rr)
-
-        fit = QPushButton("Fit to Canvas")
-        fit.clicked.connect(self.canvas.fit_selected)
-        el.addWidget(fit)
-
-        dup = QPushButton("Duplicate")
-        dup.clicked.connect(self.duplicate)
-        el.addWidget(dup)
-
-        layers = QHBoxLayout()
-        front = QPushButton("Bring Forward")
-        back = QPushButton("Send Back")
-        front.clicked.connect(self.canvas.bring_forward)
-        back.clicked.connect(self.canvas.send_backward)
-        layers.addWidget(front)
-        layers.addWidget(back)
-        el.addLayout(layers)
-
-        delete = QPushButton("🗑 Delete")
-        delete.clicked.connect(self.delete_selected)
-        el.addWidget(delete)
-
-        rl.addWidget(edit)
-
-        bg = QGroupBox("Background")
-        bgl = QVBoxLayout(bg)
-
-        color = QPushButton("Choose Color")
-        color.clicked.connect(self.choose_background)
-        bgl.addWidget(color)
-
-        for label, c1, c2 in [
-            ("Sunset", "#ff9966", "#ff5e62"),
-            ("Ocean", "#2193b0", "#6dd5ed"),
-            ("Purple", "#654ea3", "#eaafc8"),
-        ]:
-            b = QPushButton(label)
-            b.clicked.connect(
-                lambda checked=False, a=c1, b=c2: self.gradient(a, b)
-            )
-            bgl.addWidget(b)
-
-        rl.addWidget(bg)
-
-        design = QGroupBox("Design")
-        dl = QVBoxLayout(design)
-
-        lock = QPushButton("🔒 Lock / Unlock")
-        lock.clicked.connect(self.toggle_lock)
-        dl.addWidget(lock)
-
-        shadow = QPushButton("✨ Toggle Photo Shadow")
-        shadow.clicked.connect(self.toggle_shadow)
-        dl.addWidget(shadow)
-
-        frame = QPushButton("▣ White Photo Frame")
-        frame.clicked.connect(lambda: self.apply_frame())
-        dl.addWidget(frame)
-
-        align_row1 = QHBoxLayout()
-        for label, fn in [
-            ("←", self.align_left),
-            ("↔", self.snap_center),
-            ("→", self.align_right),
-        ]:
-            b = QPushButton(label)
-            b.clicked.connect(fn)
-            align_row1.addWidget(b)
-        dl.addLayout(align_row1)
-
-        align_row2 = QHBoxLayout()
-        for label, fn in [
-            ("↑", self.align_top),
-            ("↕", self.snap_center),
-            ("↓", self.align_bottom),
-        ]:
-            b = QPushButton(label)
-            b.clicked.connect(fn)
-            align_row2.addWidget(b)
-        dl.addLayout(align_row2)
-
-        rl.addWidget(design)
-
-        textbox = QGroupBox("Text Style")
-        tx = QVBoxLayout(textbox)
-
-        self.font_combo = QComboBox()
-        self.font_combo.addItems([
-            "Segoe UI", "Arial", "Georgia", "Times New Roman",
-            "Courier New", "Verdana"
-        ])
-        self.font_combo.currentTextChanged.connect(self.change_font)
-        tx.addWidget(self.font_combo)
-
-        self.font_size = QSlider(Qt.Horizontal)
-        self.font_size.setRange(10, 96)
-        self.font_size.setValue(30)
-        self.font_size.valueChanged.connect(self.change_font_size)
-        tx.addWidget(self.font_size)
-
-        self.bold_button = QPushButton("Bold")
-        self.bold_button.setCheckable(True)
-        self.bold_button.clicked.connect(self.change_bold)
-        tx.addWidget(self.bold_button)
-
-        text_color = QPushButton("Text Color")
-        text_color.clicked.connect(self.choose_text_color)
-        tx.addWidget(text_color)
-
-        rl.addWidget(textbox)
-
-        export = QPushButton("💾  Export Collage")
-        export.setMinimumHeight(48)
+        export = QPushButton("Export Collage")
+        export.setMinimumHeight(44)
         export.clicked.connect(self.export)
-        rl.addWidget(export)
+        right_layout.addWidget(export)
 
-        right_scroll.setWidget(right)
-        right_outer.addWidget(right_scroll)
-        splitter.addWidget(right_container)
-        splitter.setSizes([280, 850, 320])
-
-        self.setCentralWidget(splitter)
+        root.addWidget(right)
+        self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage(
-            "Ready — drag photos onto the canvas or use Add Photos"
-        )
+        self.statusBar().showMessage("Ready — add some photos")
 
-    def apply_theme(self):
-        """Apply high-contrast interface styling."""
-        if UI_WHITE_TEXT:
-            fg = "#f2f4f7"
-            button_bg = "#252b35"
-            button_hover = "#333b49"
-            button_pressed = "#1d222b"
-            panel_bg = "#171a20"
-            border = "#3b4350"
-            combo_bg = "#252b35"
-            combo_popup = "#20252d"
-            selection = "#344052"
-        else:
-            fg = "#101318"
-            button_bg = "#f0f2f5"
-            button_hover = "#ffffff"
-            button_pressed = "#dfe4ea"
-            panel_bg = "#f7f8fa"
-            border = "#aeb7c4"
-            combo_bg = "#ffffff"
-            combo_popup = "#ffffff"
-            selection = "#cbd8ea"
-
-        self.setStyleSheet(f"""
-        QMainWindow {{
-            background:#101218;
-        }}
-        QWidget {{
-            color:{fg};
-        }}
-        QToolBar {{
-            background:#171a21;
-            border-bottom:1px solid #303641;
-            padding:6px;
-            spacing:5px;
-        }}
-        QToolButton {{
-            color:{fg};
-            background:{button_bg};
-            border:1px solid {border};
-            border-radius:7px;
-            padding:7px 10px;
-        }}
-        QToolButton:hover {{
-            color:{fg};
-            background:{button_hover};
-        }}
-        QPushButton {{
-            color:{fg};
-            background:{button_bg};
-            border:1px solid {border};
-            border-radius:8px;
-            padding:6px 8px;
-            min-height:30px;
-            font-size:13px;
-        }}
-        QPushButton:hover {{
-            color:{fg};
-            background:{button_hover};
-        }}
-        QPushButton:pressed {{
-            color:{fg};
-            background:{button_pressed};
-        }}
-        QPushButton:disabled {{
-            color:#7f8794;
-            background:{button_bg};
-        }}
-        QGroupBox {{
-            color:{fg};
-            border:1px solid #303641;
-            border-radius:10px;
-            margin-top:12px;
-            padding:10px;
-        }}
-        QGroupBox::title {{
-            color:{fg};
-            subcontrol-origin:margin;
-            left:10px;
-            padding:0 5px;
-        }}
-        QListWidget {{
-            color:{fg};
-            background:{panel_bg};
-            border:1px solid #303641;
-            border-radius:9px;
-        }}
-        QListWidget::item {{
-            color:{fg};
-            padding:7px;
-            border-radius:6px;
-        }}
-        QListWidget::item:selected {{
-            color:{fg};
-            background:{selection};
-        }}
-        QLabel#title {{
-            color:{fg};
-            font-size:22px;
-            font-weight:bold;
-        }}
-        QLabel#muted {{
-            color:{fg};
-        }}
-        QStatusBar {{
-            color:{fg};
-            background:{panel_bg};
-        }}
-        QComboBox {{
-            color:{fg};
-            background:{combo_bg};
-            border:1px solid {border};
-            border-radius:7px;
-            padding:5px 8px;
-            min-height:28px;
-        }}
-        QComboBox QAbstractItemView {{
-            color:{fg};
-            background:{combo_popup};
-            selection-background-color:{selection};
-        }}
-        QScrollArea {{
-            background:transparent;
-            border:none;
-        }}
-        QSlider::groove:horizontal {{
-            height:5px;
-            background:#353d49;
-            border-radius:3px;
-        }}
-        QSlider::handle:horizontal {{
-            width:15px;
-            margin:-5px 0;
-            border-radius:8px;
-            background:#8ab4ff;
-        }}
-        """)
-
-        text_color = QColor(fg)
-
-        # Force the palette on individual controls for Windows/native styles.
-        for button in self.findChildren(QPushButton):
-            pal = button.palette()
-            pal.setColor(QPalette.ButtonText, text_color)
-            pal.setColor(QPalette.WindowText, text_color)
-            button.setPalette(pal)
-
-        for label in self.findChildren(QLabel):
-            pal = label.palette()
-            pal.setColor(QPalette.WindowText, text_color)
-            label.setPalette(pal)
-
-        for combo in self.findChildren(QComboBox):
-            pal = combo.palette()
-            pal.setColor(QPalette.ButtonText, text_color)
-            pal.setColor(QPalette.WindowText, text_color)
-            pal.setColor(QPalette.Text, text_color)
-            combo.setPalette(pal)
-
-    def toggle_ui_text(self):
-        global UI_WHITE_TEXT
-        UI_WHITE_TEXT = not UI_WHITE_TEXT
-        self.apply_theme()
-        self.ui_text_button.setText(
-            "UI Text: WHITE" if UI_WHITE_TEXT else "UI Text: BLACK"
-        )
-        self.statusBar().showMessage(
-            "Interface text set to WHITE" if UI_WHITE_TEXT
-            else "Interface text set to BLACK"
-        )
-
-
-    def open_images(self):
+    def add_files(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Add Photos", "",
+            self, "Choose Photos", "",
             "Images (*.jpg *.jpeg *.png *.webp *.bmp *.gif *.tif *.tiff)"
         )
-        if not files:
+        if files:
+            self.add_paths(files)
+
+    def add_paths(self, paths):
+        added = 0
+        for p in paths:
+            if p not in self.paths and os.path.isfile(p):
+                self.paths.append(p)
+                item = QListWidgetItem(os.path.basename(p))
+                item.setToolTip(p)
+                item.setIcon(QIcon(QPixmap(p).scaled(
+                    72,72,Qt.KeepAspectRatio,Qt.SmoothTransformation)))
+                self.list.addItem(item)
+                added += 1
+        self.refresh()
+        self.statusBar().showMessage(f"Added {added} photo(s)")
+
+    def remove_selected(self):
+        rows = sorted([i.row() for i in self.list.selectedIndexes()], reverse=True)
+        for r in rows:
+            self.list.takeItem(r)
+            self.paths.pop(r)
+        self.refresh()
+
+    def move_item(self, delta):
+        row = self.list.currentRow()
+        new = row + delta
+        if row < 0 or new < 0 or new >= self.list.count():
             return
-        items = self.canvas.add_images(files)
-        for path, graphics_item in zip(files, items):
-            li = QListWidgetItem(Path(path).name)
-            pm = QPixmap(path).scaled(
-                64,64,Qt.KeepAspectRatio,Qt.SmoothTransformation
-            )
-            li.setIcon(QIcon(pm))
-            li.setData(Qt.UserRole, graphics_item)
-            self.photo_list.addItem(li)
-        self.statusBar().showMessage(f"Added {len(items)} photo(s)")
+        item = self.list.takeItem(row)
+        path = self.paths.pop(row)
+        self.list.insertItem(new, item)
+        self.paths.insert(new, path)
+        self.list.setCurrentRow(new)
+        self.refresh()
 
-    def select_from_list(self, item):
-        obj = item.data(Qt.UserRole)
-        self.canvas.select(obj)
-        self.sync_scale()
-
-    def selected_image(self):
-        item = self.canvas.selected()
-        return item if isinstance(item, ImageItem) else None
-
-    def sync_scale(self):
-        item = self.selected_image()
-        if item:
-            value = max(10, min(300, round(item.scale()*100)))
-            self.scale.blockSignals(True)
-            self.scale.setValue(value)
-            self.scale.blockSignals(False)
-            self.scale_label.setText(f"Scale: {value}%")
-
-    def change_scale(self, value):
-        self.scale_label.setText(f"Scale: {value}%")
-        self.canvas.scale_selected(value)
-
-    def rotate(self, degrees):
-        self.canvas.rotate(degrees)
-        self.sync_scale()
-
-    def duplicate(self):
-        new = self.canvas.duplicate_selected()
-        if new:
-            li = QListWidgetItem(Path(new.path).name + " copy")
-            li.setIcon(QIcon(new.pixmap().scaled(
-                64,64,Qt.KeepAspectRatio,Qt.SmoothTransformation
-            )))
-            li.setData(Qt.UserRole, new)
-            self.photo_list.addItem(li)
-            self.photo_list.setCurrentItem(li)
-            self.statusBar().showMessage("Photo duplicated")
-
-    def delete_selected(self):
-        selected = self.canvas.selected()
-        if not selected:
-            return
-        for i in range(self.photo_list.count()-1, -1, -1):
-            item = self.photo_list.item(i)
-            if item.data(Qt.UserRole) is selected:
-                self.photo_list.takeItem(i)
-                break
-        self.canvas.delete_selected()
-        self.statusBar().showMessage("Selected item deleted")
-
-    def add_text(self):
-        text, ok = QInputDialog.getText(self, "Add Text", "Enter text:")
-        if ok and text.strip():
-            self.canvas.add_text(text)
-
-    def canvas_add_rectangle(self):
-        self.canvas.add_rectangle()
-
-    def canvas_add_circle(self):
-        self.canvas.add_circle()
-
-    def choose_background(self):
-        c = QColorDialog.getColor(
-            self.canvas.background, self, "Choose Background"
+    def refresh(self):
+        self.canvas.set_images(self.paths)
+        self.canvas.set_options(
+            layout_name=self.layout_combo.currentText(),
+            spacing=self.spacing.value(),
+            radius=self.corners.value(),
+            fit_mode=self.fit_combo.currentText()
         )
+        self.count_label.setText(f"{len(self.paths)} photo(s)")
+        self.statusBar().showMessage(
+            f"{len(self.paths)} photo(s) • {self.layout_combo.currentText()} • {self.fit_combo.currentText()}"
+        )
+
+    def choose_bg(self):
+        c = QColorDialog.getColor(self.canvas.bg, self, "Choose Background")
         if c.isValid():
-            self.canvas.background = c
-            self.canvas.setBackgroundBrush(c)
+            self.canvas.bg = c
+            self.canvas.update()
 
-    def gradient(self, a, b):
-        from PySide6.QtGui import QLinearGradient
-        g = QLinearGradient(0,0,self.canvas.scene.width(),
-                            self.canvas.scene.height())
-        g.setColorAt(0, QColor(a))
-        g.setColorAt(1, QColor(b))
-        self.canvas.setBackgroundBrush(QBrush(g))
+    def choose_border(self):
+        c = QColorDialog.getColor(self.canvas.border, self, "Choose Border")
+        if c.isValid():
+            self.canvas.border = c
+            self.canvas.update()
 
-    def toggle_lock(self):
-        state = self.canvas.toggle_lock_selected()
-        if state is not None:
-            self.statusBar().showMessage(
-                "Selected object locked" if state else "Selected object unlocked"
-            )
-
-    def toggle_shadow(self):
-        item = self.canvas.selected()
-        if isinstance(item, ImageItem):
-            enabled = item.graphicsEffect() is None
-            item.set_shadow(enabled)
-            self.statusBar().showMessage(
-                "Photo shadow enabled" if enabled else "Photo shadow removed"
-            )
-
-    def apply_frame(self):
-        item = self.canvas.selected()
-        if isinstance(item, ImageItem):
-            item.set_frame(8, QColor("#ffffff"))
-            self.statusBar().showMessage("White photo frame applied")
-
-    def align_left(self):
-        self.canvas.align_left()
-
-    def align_right(self):
-        self.canvas.align_right()
-
-    def align_top(self):
-        self.canvas.align_top()
-
-    def align_bottom(self):
-        self.canvas.align_bottom()
-
-    def snap_center(self):
-        self.canvas.snap_selected()
-
-    def change_font(self, family):
-        self.canvas.style_selected_text(family=family)
-
-    def change_font_size(self, value):
-        self.canvas.style_selected_text(size=value)
-
-    def change_bold(self, checked):
-        self.canvas.style_selected_text(bold=checked)
-
-    def choose_text_color(self):
-        color = QColorDialog.getColor(QColor("white"), self, "Text Color")
-        if color.isValid():
-            self.canvas.style_selected_text(color=color)
+    def clear(self):
+        self.paths.clear()
+        self.list.clear()
+        self.refresh()
 
     def export(self):
-        filename, _ = QFileDialog.getSaveFileName(
+        if not self.paths:
+            QMessageBox.information(self, "Nothing to export",
+                                    "Add at least one photo first.")
+            return
+        path, selected = QFileDialog.getSaveFileName(
             self, "Export Collage", "my_collage.png",
             "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg)"
         )
-        if not filename:
+        if not path:
             return
         try:
-            self.canvas.export_image(filename, 2000, 1500)
-            QMessageBox.information(
-                self, "Export Complete",
-                f"Collage exported successfully.\n\n{filename}"
-            )
-            self.statusBar().showMessage(f"Exported: {filename}")
+            img = self.canvas.render_image(2000, 1500)
+            if path.lower().endswith((".jpg",".jpeg")):
+                if img.format() != QImage.Format_RGB32:
+                    converted = img.convertToFormat(QImage.Format_RGB32)
+                    img = converted
+                ok = img.save(path, "JPEG", 95)
+            else:
+                ok = img.save(path, "PNG")
+            if ok:
+                self.statusBar().showMessage(f"Exported: {path}")
+                QMessageBox.information(self, "Export complete",
+                                        f"Collage saved successfully.\n\n{path}")
+            else:
+                raise RuntimeError("Qt could not save the image.")
         except Exception as e:
-            QMessageBox.critical(self, "Export Error", str(e))
+            QMessageBox.critical(self, "Export failed", str(e))
 
 
 def main():
